@@ -60,6 +60,7 @@ def render_library_tab() -> None:
     st.subheader("Component Library (v1)")
     st.caption("Parameter registry only. Engine semantics are locked. All changes are versioned and validated.")
     payload, lib_hash = lib.load_library()
+    # Keep in-memory schema libs aligned with the active library snapshot.
     lib.apply_library_to_schemas(payload)
 
     st.info(f"Active library hash: {lib_hash}")
@@ -72,14 +73,12 @@ def render_library_tab() -> None:
     with tcol3:
         st.write("")
         st.write("")
-        export = st.button("Export snapshot JSON")
-
-    if export:
         st.download_button(
-            label="Download current library JSON",
+            label="Export snapshot JSON",
             data=json.dumps(payload, indent=2),
             file_name="virtos_component_library_snapshot.json",
             mime="application/json",
+            key="lib_export_snapshot",
         )
 
     records = lib.list_records(payload, component_type=ctype)
@@ -89,14 +88,15 @@ def render_library_tab() -> None:
     st.write("Edit records below. Add rows to create new SKUs. Fields `param__*` and `cost__*` are free-form but validated for required keys.")
     edited = st.data_editor(
         flat,
-        use_container_width=True,
+        width="stretch",
         num_rows="dynamic",
         column_order=cols,
         hide_index=True,
+        key=f"component_editor__{ctype}",
     )
 
     # Rebuild full record list for all types, replacing only this type
-    if st.button("Validate + Save changes", type="primary"):
+    if st.button("Validate + Save changes", type="primary", key=f"save__{ctype}"):
         # Unflatten edited rows
         updated_this_type = []
         for row in edited:
@@ -117,6 +117,8 @@ def render_library_tab() -> None:
         lib.save_library(new_payload)
         lib.apply_library_to_schemas(new_payload)
         st.success(f"Saved. New library hash: {new_hash}")
+        # Only rerun when a save succeeds.
+        st.rerun()
         
 
     st.divider()
@@ -211,4 +213,3 @@ def render_library_tab() -> None:
                 st.caption(f"Showing first 200 changes of {len(field_changes)} total.")
 
 
-    st.rerun()

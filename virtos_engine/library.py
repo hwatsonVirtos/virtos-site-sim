@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # v1.4 requires explicit provenance + version stamping for extracted params.
 # This module implements Variant A: parameter library editable in UI, semantics remain in engine.
 
-LIBRARY_FILENAME = ".virtos_component_library.json"
+LIBRARY_REL_PATH = Path("data") / "component_library.json"
 
 @dataclass
 class ComponentRecord:
@@ -29,7 +29,7 @@ def _default_library_path(base_dir: Optional[Path] = None) -> Path:
     if base_dir is None:
         # Place library beside app.py by default (repo root)
         base_dir = Path(__file__).resolve().parents[1]
-    return base_dir / LIBRARY_FILENAME
+    return base_dir / LIBRARY_REL_PATH
 
 def _hash_library(payload: Dict[str, Any]) -> str:
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -142,6 +142,7 @@ def default_records() -> List[ComponentRecord]:
 
 def load_library(base_dir: Optional[Path] = None) -> Tuple[Dict[str, Any], str]:
     path = _default_library_path(base_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         payload = {
             "schema_version": "v1.0",
@@ -159,6 +160,7 @@ def load_library(base_dir: Optional[Path] = None) -> Tuple[Dict[str, Any], str]:
 
 def save_library(payload: Dict[str, Any], base_dir: Optional[Path] = None) -> str:
     path = _default_library_path(base_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(payload)
     payload["library_hash"] = _hash_library(payload)
     path.write_text(json.dumps(payload, indent=2))

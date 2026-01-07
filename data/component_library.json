@@ -1,57 +1,166 @@
 {
-  "meta": {
-    "schema_version": 1,
-    "created_utc": "2026-01-07T00:00:00Z",
-    "notes": "Initial v1 component library. Editable. Persist by committing updates."
-  },
-  "components": [
+  "schema_version": "v1.0",
+  "generated_from": "default_records",
+  "records": [
     {
-      "id": "CABLE_375A",
-      "type": "cable",
-      "name": "Cable 375A",
-      "architecture_compatibility": ["virtos", "grid_only", "ac_coupled"],
-      "parameters": {"imax_a": 375},
-      "costs": {},
-      "source": "Virtos Pilot System Datasheet",
+      "component_id": "PCS_500",
+      "component_type": "pcs",
+      "name": "PCS 500 kW",
+      "architecture_compatibility": [
+        "virtos",
+        "grid_only",
+        "ac_coupled"
+      ],
+      "parameters": {
+        "power_kw": 500.0
+      },
+      "costs": {
+        "capex_aud": 0.0
+      },
+      "source": "user_input",
       "version": 1,
       "effective_date": "2026-01-07",
-      "notes": ""
+      "notes": "Default placeholder PCS size."
     },
     {
-      "id": "CABLE_600A",
-      "type": "cable",
-      "name": "Cable 600A",
-      "architecture_compatibility": ["virtos", "grid_only", "ac_coupled"],
-      "parameters": {"imax_a": 600},
-      "costs": {},
-      "source": "Virtos Pilot System Datasheet",
+      "component_id": "PCS_1000",
+      "component_type": "pcs",
+      "name": "PCS 1000 kW",
+      "architecture_compatibility": [
+        "virtos",
+        "grid_only",
+        "ac_coupled"
+      ],
+      "parameters": {
+        "power_kw": 1000.0
+      },
+      "costs": {
+        "capex_aud": 0.0
+      },
+      "source": "user_input",
       "version": 1,
       "effective_date": "2026-01-07",
-      "notes": ""
+      "notes": "Default placeholder PCS size."
     },
     {
-      "id": "CABLE_1500A",
-      "type": "cable",
-      "name": "Cable 1500A",
-      "architecture_compatibility": ["virtos", "grid_only", "ac_coupled"],
-      "parameters": {"imax_a": 1500},
-      "costs": {},
-      "source": "Virtos Pilot System Datasheet",
+      "component_id": "BATT_500_1000",
+      "component_type": "battery",
+      "name": "Battery 500 kW / 1000 kWh",
+      "architecture_compatibility": [
+        "virtos",
+        "ac_coupled"
+      ],
+      "parameters": {
+        "power_kw": 500.0,
+        "energy_kwh": 1000.0
+      },
+      "costs": {
+        "capex_aud": 0.0
+      },
+      "source": "user_input",
       "version": 1,
       "effective_date": "2026-01-07",
-      "notes": ""
+      "notes": "Default placeholder battery."
     },
     {
-      "id": "DCDC_100KW",
-      "type": "dcdc",
+      "component_id": "BATT_1000_2000",
+      "component_type": "battery",
+      "name": "Battery 1000 kW / 2000 kWh",
+      "architecture_compatibility": [
+        "virtos",
+        "ac_coupled"
+      ],
+      "parameters": {
+        "power_kw": 1000.0,
+        "energy_kwh": 2000.0
+      },
+      "costs": {
+        "capex_aud": 0.0
+      },
+      "source": "user_input",
+      "version": 1,
+      "effective_date": "2026-01-07",
+      "notes": "Default placeholder battery."
+    },
+    {
+      "component_id": "CABLE_375A",
+      "component_type": "cable",
+      "name": "Cable 375A (CCS Fleet)",
+      "architecture_compatibility": [
+        "virtos",
+        "grid_only",
+        "ac_coupled"
+      ],
+      "parameters": {
+        "imax_a": 375
+      },
+      "costs": {
+        "capex_aud": 0.0
+      },
+      "source": "Virtos Pilot System Datasheet (PDF)",
+      "version": 1,
+      "effective_date": "2026-01-07",
+      "notes": "CCS Fleet: 375A continuous."
+    },
+    {
+      "component_id": "CABLE_600A",
+      "component_type": "cable",
+      "name": "Cable 600A (CCS Ultra)",
+      "architecture_compatibility": [
+        "virtos",
+        "grid_only",
+        "ac_coupled"
+      ],
+      "parameters": {
+        "imax_a": 600
+      },
+      "costs": {
+        "capex_aud": 0.0
+      },
+      "source": "Virtos Pilot System Datasheet (PDF)",
+      "version": 1,
+      "effective_date": "2026-01-07",
+      "notes": "CCS Ultra: 600A continuous; boost excluded in v1."
+    },
+    {
+      "component_id": "CABLE_1500A",
+      "component_type": "cable",
+      "name": "Cable 1500A (MCS)",
+      "architecture_compatibility": [
+        "virtos",
+        "grid_only",
+        "ac_coupled"
+      ],
+      "parameters": {
+        "imax_a": 1500
+      },
+      "costs": {
+        "capex_aud": 0.0
+      },
+      "source": "Virtos Pilot System Datasheet (PDF)",
+      "version": 1,
+      "effective_date": "2026-01-07",
+      "notes": "MCS: 1500A continuous."
+    },
+    {
+      "component_id": "DCDC_100KW",
+      "component_type": "dcdc",
       "name": "DC-DC Module 100 kW",
-      "architecture_compatibility": ["virtos"],
-      "parameters": {"cap_kw": 100},
-      "costs": {},
+      "architecture_compatibility": [
+        "virtos"
+      ],
+      "parameters": {
+        "cap_kw": 100.0
+      },
+      "costs": {
+        "capex_aud": 0.0
+      },
       "source": "Locked decision",
       "version": 1,
       "effective_date": "2026-01-07",
-      "notes": "Per-module cap locked in v1."
+      "notes": "Cap locked in v1.4 at 100 kW per module."
     }
-  ]
+  ],
+  "history": [],
+  "library_hash": "9cbf9cfe115d"
 }

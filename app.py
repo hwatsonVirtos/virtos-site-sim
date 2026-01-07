@@ -1,3 +1,7 @@
+import json
+from dataclasses import asdict
+from typing import Literal, Dict, Any
+
 import streamlit as st
 
 from virtos_ui.inputs import build_site_from_sidebar
@@ -8,11 +12,49 @@ from virtos_ui.library_ui import render_library_tab
 
 from virtos_engine.library import load_library, apply_library_to_schemas
 from virtos_engine.core import simulate_virtos, simulate_grid_only, simulate_ac_coupled
+from virtos_engine.schemas import SiteSpec, DemandProfile, TariffSpec
 
 
-st.set_page_config(page_title="Virtos Site Simulator (UI Batch 2.1)", layout="wide")
-st.title("Virtos Site Simulator (UI Batch 2.1)")
+st.set_page_config(page_title="Virtos Site Simulator (UI Batch 2.2)", layout="wide")
+st.title("Virtos Site Simulator (UI Batch 2.2)")
 st.caption("Internal v1 workbench. Physics-first: power flows → service → costs. Libraries and tariffs are simplified placeholders.")
+
+ARCH = Literal["virtos", "grid_only", "ac_coupled"]
+
+def _fingerprint_site(site: SiteSpec) -> str:
+    # Canonical: explicit, stable fingerprint for caching and explicit run gating.
+    return json.dumps(asdict(site), sort_keys=True, separators=(",", ":"))
+
+def _site_from_dict(d: Dict[str, Any]) -> SiteSpec:
+    demand = d.get("demand") or {}
+    tariff = d.get("tariff") or {}
+    return SiteSpec(
+        name=d.get("name", "Site"),
+        demand=DemandProfile(**demand),
+        n_superstrings=int(d.get("n_superstrings", 2)),
+        grid_connection_kw=float(d.get("grid_connection_kw", 1000.0)),
+        shared_pcs_kw=float(d.get("shared_pcs_kw", 300.0)),
+        pcs_sku=str(d.get("pcs_sku", "PCS_500")),
+        battery_sku=str(d.get("battery_sku", "BATT_500_1000")),
+        dcdc_modules=int(d.get("dcdc_modules", 10)),
+        cable_type=str(d.get("cable_type", "CABLE_600A")),
+        allow_grid_charge=bool(d.get("allow_grid_charge", False)),
+        grid_charge_target_soc_pct=float(d.get("grid_charge_target_soc_pct", 100.0)),
+        grid_charge_power_kw=float(d.get("grid_charge_power_kw", 200.0)),
+        ac_bess_power_kw=float(d.get("ac_bess_power_kw", 0.0)),
+        ac_bess_energy_kwh=float(d.get("ac_bess_energy_kwh", 0.0)),
+        tariff=TariffSpec(**tariff),
+    )
+
+@st.cache_data(show_spinner=False)
+def _simulate_cached(site_fingerprint: str, arch: ARCH) -> Dict[str, Any]:
+    site = _site_from_dict(json.loads(site_fingerprint))
+    if arch == "virtos":
+        return simulate_virtos(site)
+    if arch == "grid_only":
+        return simulate_grid_only(site)
+    return simulate_ac_coupled(site)
+
 
 # Load component library (editable via Library tab) and apply to in-memory schemas
 _payload, _lib_hash = load_library()
@@ -20,6 +62,21 @@ apply_library_to_schemas(_payload)
 st.sidebar.caption(f"Library: {_lib_hash}")
 
 site = build_site_from_sidebar()
+site_fp = _fingerprint_site(site)
+
+st.sidebar.divider()
+auto_run = st.sidebar.checkbox("Auto-run on input change", value=False)
+run_clicked = st.sidebar.button("Run / refresh results", type="primary")
+
+if "last_run_fp" not in st.session_state:
+    st.session_state["last_run_fp"] = None
+
+if auto_run:
+    st.session_state["last_run_fp"] = site_fp
+elif run_clicked:
+    st.session_state["last_run_fp"] = site_fp
+
+ready_to_run = (st.session_state.get("last_run_fp") == site_fp)
 
 tabs = st.tabs(["Library", "Virtos (DC-coupled, shared PCS)", "Grid-only", "AC-coupled BESS", "Compare"])
 
@@ -27,6 +84,9 @@ with tabs[0]:
     render_library_tab()
 
 with tabs[1]:
+    if not ready_to_run:
+        st.info("Inputs changed. Press **Run / refresh results** in the sidebar (or enable Auto-run).")
+        st.stop()
     st.subheader("Site overview")
     st.write({
         "super-strings": site.n_superstrings,
@@ -43,7 +103,7 @@ with tabs[1]:
         "utilisation curve": site.demand.utilisation_curve,
     })
 
-    res = simulate_virtos(site)
+    res = _simulate_cached(site_fp, "virtos")
     ts = res["timeseries"]
 
     st.subheader("Power flows")
@@ -75,18 +135,14 @@ with tabs[1]:
     render_costs(res["costs"], site)
 
     st.subheader("Explain")
-    from virtos_engine.explain import topology_text, constraint_stack, power_flow_ledger, binding_constraint_hint
-    st.code(topology_text("virtos"))
-    st.write("Constraints")
-    st.write(constraint_stack(site, "virtos"))
-    ledger = power_flow_ledger(res, site.demand.dt_hours)
-    st.write("Power flow ledger (first 20 steps)")
-    st.table(ledger[:20])
-    st.info(binding_constraint_hint(ledger))
+    render_explain(site, "virtos", res, max_rows=20)
 
 
 with tabs[2]:
-    res = simulate_grid_only(site)
+    if not ready_to_run:
+        st.info("Inputs changed. Press **Run / refresh results** in the sidebar (or enable Auto-run).")
+        st.stop()
+    res = _simulate_cached(site_fp, "grid_only")
     st.subheader("Power flows")
     st.pyplot(line_chart("Grid import (kW)", res["timeseries"]["grid_import_kw_ts"], ylabel="kW"))
     st.subheader("Service")
@@ -99,19 +155,12 @@ with tabs[2]:
     st.subheader("Explain")
     render_explain(site, "grid", res, max_rows=20)
 
-    st.subheader("Explain")
-    from virtos_engine.explain import topology_text, constraint_stack, power_flow_ledger, binding_constraint_hint
-    st.code(topology_text("virtos"))
-    st.write("Constraints")
-    st.write(constraint_stack(site, "virtos"))
-    ledger = power_flow_ledger(res, site.demand.dt_hours)
-    st.write("Power flow ledger (first 20 steps)")
-    st.table(ledger[:20])
-    st.info(binding_constraint_hint(ledger))
-
 
 with tabs[3]:
-    res = simulate_ac_coupled(site)
+    if not ready_to_run:
+        st.info("Inputs changed. Press **Run / refresh results** in the sidebar (or enable Auto-run).")
+        st.stop()
+    res = _simulate_cached(site_fp, "ac_coupled")
     st.subheader("Power flows")
     st.pyplot(line_chart("Grid import (kW)", res["timeseries"]["grid_import_kw_ts"], ylabel="kW"))
     st.pyplot(line_chart("AC BESS discharge (kW)", res["timeseries"]["bess_discharge_kw_ts"], ylabel="kW"))
@@ -125,23 +174,17 @@ with tabs[3]:
     st.subheader("Explain")
     render_explain(site, "ac", res, max_rows=20)
 
-    st.subheader("Explain")
-    from virtos_engine.explain import topology_text, constraint_stack, power_flow_ledger, binding_constraint_hint
-    st.code(topology_text("virtos"))
-    st.write("Constraints")
-    st.write(constraint_stack(site, "virtos"))
-    ledger = power_flow_ledger(res, site.demand.dt_hours)
-    st.write("Power flow ledger (first 20 steps)")
-    st.table(ledger[:20])
-    st.info(binding_constraint_hint(ledger))
-
 
 with tabs[4]:
     st.subheader("Compare architectures")
     from virtos_engine.explain import value_prop_delta
-    v = simulate_virtos(site)
-    g = simulate_grid_only(site)
-    a = simulate_ac_coupled(site)
+    if not ready_to_run:
+        st.info("Inputs changed. Press **Run / refresh results** in the sidebar (or enable Auto-run).")
+        st.stop()
+
+    v = _simulate_cached(site_fp, "virtos")
+    g = _simulate_cached(site_fp, "grid_only")
+    a = _simulate_cached(site_fp, "ac_coupled")
 
     rows = [
         ("Virtos", v["costs"]["total_cost_$"], v["costs"]["peak_kw"], v["metrics"]["power_satisfied_pct"]),
