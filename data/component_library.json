@@ -1,0 +1,57 @@
+{
+  "meta": {
+    "schema_version": 1,
+    "created_utc": "2026-01-07T00:00:00Z",
+    "notes": "Initial v1 component library. Editable. Persist by committing updates."
+  },
+  "components": [
+    {
+      "id": "CABLE_375A",
+      "type": "cable",
+      "name": "Cable 375A",
+      "architecture_compatibility": ["virtos", "grid_only", "ac_coupled"],
+      "parameters": {"imax_a": 375},
+      "costs": {},
+      "source": "Virtos Pilot System Datasheet",
+      "version": 1,
+      "effective_date": "2026-01-07",
+      "notes": ""
+    },
+    {
+      "id": "CABLE_600A",
+      "type": "cable",
+      "name": "Cable 600A",
+      "architecture_compatibility": ["virtos", "grid_only", "ac_coupled"],
+      "parameters": {"imax_a": 600},
+      "costs": {},
+      "source": "Virtos Pilot System Datasheet",
+      "version": 1,
+      "effective_date": "2026-01-07",
+      "notes": ""
+    },
+    {
+      "id": "CABLE_1500A",
+      "type": "cable",
+      "name": "Cable 1500A",
+      "architecture_compatibility": ["virtos", "grid_only", "ac_coupled"],
+      "parameters": {"imax_a": 1500},
+      "costs": {},
+      "source": "Virtos Pilot System Datasheet",
+      "version": 1,
+      "effective_date": "2026-01-07",
+      "notes": ""
+    },
+    {
+      "id": "DCDC_100KW",
+      "type": "dcdc",
+      "name": "DC-DC Module 100 kW",
+      "architecture_compatibility": ["virtos"],
+      "parameters": {"cap_kw": 100},
+      "costs": {},
+      "source": "Locked decision",
+      "version": 1,
+      "effective_date": "2026-01-07",
+      "notes": "Per-module cap locked in v1."
+    }
+  ]
+}
