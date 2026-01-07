@@ -1,10 +1,11 @@
 import json
+import warnings
 from dataclasses import asdict
 from typing import Literal, Dict, Any
 
 import streamlit as st
 
-from virtos_ui.inputs import build_site_from_sidebar
+from virtos_ui.topology_ui import render_site_inputs_form
 from virtos_ui.charts import line_chart
 from virtos_ui.summaries import render_metrics, render_costs, render_sanity_warnings
 from virtos_ui.explain_ui import render_explain
@@ -16,6 +17,15 @@ from virtos_engine.schemas import SiteSpec, DemandProfile, TariffSpec
 
 
 st.set_page_config(page_title="Virtos Site Simulator (UI Batch 2.2)", layout="wide")
+
+# Streamlit Cloud can emit extremely noisy deprecation warnings in some
+# environments (notably around `use_container_width`). These warnings are UI-only
+# and do not affect simulator physics. If they spam logs, they can materially
+# slow provisioning and make debugging impossible.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Please replace `use_container_width` with `width`\.",
+)
 st.title("Virtos Site Simulator (UI Batch 2.2)")
 st.caption("Internal v1 workbench. Physics-first: power flows → service → costs. Libraries and tariffs are simplified placeholders.")
 
@@ -61,17 +71,24 @@ _payload, _lib_hash = load_library()
 apply_library_to_schemas(_payload)
 st.sidebar.caption(f"Library: {_lib_hash}")
 
-site = build_site_from_sidebar()
+# Main-page inputs (under topology). Values update only on submit (v1) to avoid rerun storms.
+with st.form("site_form", clear_on_submit=False):
+    site = render_site_inputs_form(default_n_strings=2)
+    applied = st.form_submit_button("Apply inputs", type="primary")
+
 site_fp = _fingerprint_site(site)
 
 st.sidebar.divider()
-auto_run = st.sidebar.checkbox("Auto-run on input change", value=False)
-run_clicked = st.sidebar.button("Run / refresh results", type="primary")
+st.sidebar.subheader("Run control")
+
+auto_run = st.sidebar.checkbox("Auto-run after Apply", value=True, help="Since inputs only change on Apply, this is safe.")
+run_clicked = st.sidebar.button("Run / refresh results", type="primary", help="Runs simulation for the currently applied inputs.")
 
 if "last_run_fp" not in st.session_state:
     st.session_state["last_run_fp"] = None
 
-if auto_run:
+# Auto-run triggers whenever inputs are applied (site_fp changes only on Apply).
+if auto_run and (st.session_state.get("last_run_fp") != site_fp):
     st.session_state["last_run_fp"] = site_fp
 elif run_clicked:
     st.session_state["last_run_fp"] = site_fp
