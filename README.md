@@ -1,1 +1,3 @@
-Batch 3.2 — structural coherence pass
+# Virtos Site Simulator
+
+Run locally: `streamlit run app.py`
