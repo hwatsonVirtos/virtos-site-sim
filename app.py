@@ -5,7 +5,7 @@ from typing import Literal, Dict, Any
 
 import streamlit as st
 
-from virtos_ui.topology_ui import render_site_inputs_form
+from virtos_ui.topology_ui import render_site_inputs_dashboard
 from virtos_ui.charts import line_chart
 from virtos_ui.summaries import render_metrics, render_costs, render_sanity_warnings
 from virtos_ui.explain_ui import render_explain
@@ -16,7 +16,20 @@ from virtos_engine.core import simulate_virtos, simulate_grid_only, simulate_ac_
 from virtos_engine.schemas import SiteSpec, DemandProfile, TariffSpec
 
 
-st.set_page_config(page_title="Virtos Site Simulator (UI Batch 2.2)", layout="wide")
+st.set_page_config(page_title="Virtos Site Simulator", layout="wide")
+
+# --- Virtos theme hard-override (Streamlit Cloud sometimes ignores config.toml on partial uploads)
+VIRTOS_GREEN = "#84BD00"  # Pantone 376C approx
+st.markdown(f"""
+<style>
+:root {{ --primary-color: {VIRTOS_GREEN}; }}
+.stButton>button {{ background-color: {VIRTOS_GREEN} !important; border-color: {VIRTOS_GREEN} !important; }}
+.stButton>button:hover {{ filter: brightness(0.95); }}
+/* Slider track + fill (best-effort; Streamlit/BaseWeb DOM may change) */
+div[data-baseweb="slider"] div[role="slider"] {{ background-color: {VIRTOS_GREEN} !important; }}
+div[data-baseweb="slider"] div[aria-valuenow] {{ background-color: {VIRTOS_GREEN} !important; }}
+</style>
+""", unsafe_allow_html=True)
 
 # Streamlit Cloud can emit extremely noisy deprecation warnings in some
 # environments (notably around `use_container_width`). These warnings are UI-only
@@ -26,8 +39,8 @@ warnings.filterwarnings(
     "ignore",
     message=r"Please replace `use_container_width` with `width`\.",
 )
-st.title("Virtos Site Simulator (UI Batch 2.2)")
-st.caption("Internal v1 workbench. Physics-first: power flows → service → costs. Libraries and tariffs are simplified placeholders.")
+st.title("Virtos Site Simulator")
+st.caption("Internal v1 workbench. Physics-first: demand → constraints → power flows → service → costs.")
 
 ARCH = Literal["virtos", "grid_only", "ac_coupled"]
 
@@ -71,18 +84,18 @@ _payload, _lib_hash = load_library()
 apply_library_to_schemas(_payload)
 st.sidebar.caption(f"Library: {_lib_hash}")
 
-# Main-page inputs (under topology). Values update only on submit (v1) to avoid rerun storms.
+# Main dashboard inputs (Variant B). Values update only on submit (v1) to avoid rerun storms.
 with st.form("site_form", clear_on_submit=False):
-    site = render_site_inputs_form(default_n_strings=2)
-    applied = st.form_submit_button("Apply inputs", type="primary")
+    site = render_site_inputs_dashboard(default_n_strings=2)
+    applied = st.form_submit_button("Apply & Run", type="primary")
 
 site_fp = _fingerprint_site(site)
 
 st.sidebar.divider()
 st.sidebar.subheader("Run control")
 
-auto_run = st.sidebar.checkbox("Auto-run after Apply", value=True, help="Since inputs only change on Apply, this is safe.")
-run_clicked = st.sidebar.button("Run / refresh results", type="primary", help="Runs simulation for the currently applied inputs.")
+auto_run = st.sidebar.checkbox("Auto-run after Apply", value=True, help="Inputs only change on Apply, so this is safe.")
+run_clicked = st.sidebar.button("Run / refresh results", type="primary")
 
 if "last_run_fp" not in st.session_state:
     st.session_state["last_run_fp"] = None
@@ -95,110 +108,59 @@ elif run_clicked:
 
 ready_to_run = (st.session_state.get("last_run_fp") == site_fp)
 
-tabs = st.tabs(["Library", "Virtos (DC-coupled, shared PCS)", "Grid-only", "AC-coupled BESS", "Compare"])
+st.divider()
 
-with tabs[0]:
+# Drill-down: component library (keep out of main render path)
+with st.expander("Component library (edit SKUs, costs, limits)", expanded=False):
     render_library_tab()
 
-with tabs[1]:
+st.subheader("Results")
+results_tabs = st.tabs(["Virtos", "Grid-only", "AC-coupled", "Compare"])
+
+def _needs_run():
     if not ready_to_run:
         st.info("Inputs changed. Press **Run / refresh results** in the sidebar (or enable Auto-run).")
         st.stop()
-    st.subheader("Site overview")
-    st.write({
-        "super-strings": site.n_superstrings,
-        "grid connection cap (kW)": site.grid_connection_kw,
-        "shared PCS cap (kW)": site.shared_pcs_kw,
-        "PCS SKU": site.pcs_sku,
-        "Battery SKU": site.battery_sku,
-        "DC-DC modules/string": site.dcdc_modules,
-        "Cable type": site.cable_type,
-        "allow grid charge": site.allow_grid_charge,
-        "grid charge target SOC (%)": site.grid_charge_target_soc_pct,
-        "grid charge power (kW)": site.grid_charge_power_kw,
-        "timestep (min)": site.demand.timestep_minutes,
-        "utilisation curve": site.demand.utilisation_curve,
-    })
 
+with results_tabs[0]:
+    _needs_run()
     res = _simulate_cached(site_fp, "virtos")
-    ts = res["timeseries"]
-
-    st.subheader("Power flows")
-    st.pyplot(line_chart("Grid import (kW)", ts["grid_import_kw_ts"], ylabel="kW"))
-    st.pyplot(line_chart("PCS used total (kW)", ts["pcs_used_kw_ts"], ylabel="kW"))
-
-    n = len(site.demand.utilisation_curve)
-    batt_dis_sum = [0.0]*n
-    batt_chg_sum = [0.0]*n
-    soc_sum = [0.0]*n
-    for s in res["state"].values():
-        for i, v in enumerate(s["battery_discharge_kw_ts"]):
-            batt_dis_sum[i] += v
-        for i, v in enumerate(s["battery_charge_kw_ts"]):
-            batt_chg_sum[i] += v
-        for i, v in enumerate(s["soc_ts_kwh"]):
-            soc_sum[i] += v
-
-    st.pyplot(line_chart("Battery discharge total (kW)", batt_dis_sum, ylabel="kW"))
-    st.pyplot(line_chart("Battery charge total (kW)", batt_chg_sum, ylabel="kW"))
-    st.pyplot(line_chart("SOC total (kWh)", soc_sum, ylabel="kWh"))
-
-    st.subheader("Service")
     render_metrics(res["metrics"])
-
+    render_costs(res["costs"], site)
     render_sanity_warnings(res, site, architecture="virtos")
+    with st.expander("Power flow charts", expanded=False):
+        ts = res["timeseries"]
+        st.pyplot(line_chart("Grid import (kW)", ts["grid_import_kw_ts"], ylabel="kW"))
+        st.pyplot(line_chart("PCS used total (kW)", ts["pcs_used_kw_ts"], ylabel="kW"))
+    with st.expander("Explain", expanded=False):
+        render_explain(site, "virtos", res, max_rows=25)
 
-    st.subheader("Costs (Tariff v1)")
-    render_costs(res["costs"], site)
-
-    st.subheader("Explain")
-    render_explain(site, "virtos", res, max_rows=20)
-
-
-with tabs[2]:
-    if not ready_to_run:
-        st.info("Inputs changed. Press **Run / refresh results** in the sidebar (or enable Auto-run).")
-        st.stop()
+with results_tabs[1]:
+    _needs_run()
     res = _simulate_cached(site_fp, "grid_only")
-    st.subheader("Power flows")
-    st.pyplot(line_chart("Grid import (kW)", res["timeseries"]["grid_import_kw_ts"], ylabel="kW"))
-    st.subheader("Service")
     render_metrics(res["metrics"])
-
+    render_costs(res["costs"], site)
     render_sanity_warnings(res, site, architecture="grid_only")
-    st.subheader("Costs (Tariff v1)")
-    render_costs(res["costs"], site)
+    with st.expander("Power flow charts", expanded=False):
+        st.pyplot(line_chart("Grid import (kW)", res["timeseries"]["grid_import_kw_ts"], ylabel="kW"))
+    with st.expander("Explain", expanded=False):
+        render_explain(site, "grid", res, max_rows=25)
 
-    st.subheader("Explain")
-    render_explain(site, "grid", res, max_rows=20)
-
-
-with tabs[3]:
-    if not ready_to_run:
-        st.info("Inputs changed. Press **Run / refresh results** in the sidebar (or enable Auto-run).")
-        st.stop()
+with results_tabs[2]:
+    _needs_run()
     res = _simulate_cached(site_fp, "ac_coupled")
-    st.subheader("Power flows")
-    st.pyplot(line_chart("Grid import (kW)", res["timeseries"]["grid_import_kw_ts"], ylabel="kW"))
-    st.pyplot(line_chart("AC BESS discharge (kW)", res["timeseries"]["bess_discharge_kw_ts"], ylabel="kW"))
-    st.subheader("Service")
     render_metrics(res["metrics"])
-
-    render_sanity_warnings(res, site, architecture="ac_coupled")
-    st.subheader("Costs (Tariff v1)")
     render_costs(res["costs"], site)
+    render_sanity_warnings(res, site, architecture="ac_coupled")
+    with st.expander("Power flow charts", expanded=False):
+        st.pyplot(line_chart("Grid import (kW)", res["timeseries"]["grid_import_kw_ts"], ylabel="kW"))
+        st.pyplot(line_chart("AC BESS discharge (kW)", res["timeseries"]["bess_discharge_kw_ts"], ylabel="kW"))
+    with st.expander("Explain", expanded=False):
+        render_explain(site, "ac", res, max_rows=25)
 
-    st.subheader("Explain")
-    render_explain(site, "ac", res, max_rows=20)
-
-
-with tabs[4]:
-    st.subheader("Compare architectures")
+with results_tabs[3]:
+    _needs_run()
     from virtos_engine.explain import value_prop_delta
-    if not ready_to_run:
-        st.info("Inputs changed. Press **Run / refresh results** in the sidebar (or enable Auto-run).")
-        st.stop()
-
     v = _simulate_cached(site_fp, "virtos")
     g = _simulate_cached(site_fp, "grid_only")
     a = _simulate_cached(site_fp, "ac_coupled")
@@ -208,12 +170,6 @@ with tabs[4]:
         ("Grid-only", g["costs"]["total_cost_$"], g["costs"]["peak_kw"], g["metrics"]["power_satisfied_pct"]),
         ("AC-coupled", a["costs"]["total_cost_$"], a["costs"]["peak_kw"], a["metrics"]["power_satisfied_pct"]),
     ]
-    d_v_g = value_prop_delta(v["costs"], v["metrics"], g["costs"], g["metrics"])
-    d_v_a = value_prop_delta(v["costs"], v["metrics"], a["costs"], a["metrics"])
-    st.subheader("Virtos delta vs Grid-only")
-    st.write(d_v_g)
-    st.subheader("Virtos delta vs AC-coupled")
-    st.write(d_v_a)
 
     st.table({
         "Architecture": [r[0] for r in rows],
@@ -221,3 +177,8 @@ with tabs[4]:
         "Peak kW": [round(r[2], 1) for r in rows],
         "Power satisfied (%)": [round(r[3], 1) for r in rows],
     })
+
+    st.subheader("Virtos delta vs Grid-only")
+    st.write(value_prop_delta(v["costs"], v["metrics"], g["costs"], g["metrics"]))
+    st.subheader("Virtos delta vs AC-coupled")
+    st.write(value_prop_delta(v["costs"], v["metrics"], a["costs"], a["metrics"]))
