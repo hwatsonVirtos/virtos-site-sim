@@ -1,92 +1,90 @@
+
 import streamlit as st
-from virtos_ui.layout import render_topology_and_columns
-from virtos_ui.library import render_library_tab
-from virtos_ui.diagnostics import render_diagnostics_tab
-from virtos_ui.theme import VIRTOS_GREEN
-from virtos_engine.core import run_engine
+import pandas as pd
+import numpy as np
 
-st.set_page_config(page_title="Virtos Site Simulator", layout="wide")
+st.set_page_config(layout="wide", page_title="Virtos Site Simulator v1")
 
-# Enforce Virtos accent colour even if theme config is ignored in some deployments.
-st.markdown(
-    f"""
+st.markdown("""
 <style>
-  :root {{ --virtos-accent: {VIRTOS_GREEN}; }}
-  .stButton > button[kind="primary"], .stDownloadButton > button {{
-    background-color: var(--virtos-accent) !important;
-    color: #0B0D10 !important;
-    border: 1px solid rgba(0,0,0,0.15) !important;
-  }}
-  .stButton > button[kind="primary"]:hover {{ filter: brightness(0.95); }}
+:root { --virtos-green:#7ED957; }
+h1,h2,h3 { color: var(--virtos-green); }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
-def sidebar_runcontrol():
-    st.sidebar.header("Run control")
-    st.sidebar.toggle("Auto-run after Apply", key="autorun", value=True)
-    return st.sidebar.button("Apply & Run", type="primary")
+st.title("Virtos Site Simulator — DC Only (v1)")
 
-def collect_cfg():
-    return {
-        "architecture": st.session_state.get("architecture", "Virtos (DC-coupled)"),
-        "grid_connection_kw": st.session_state.get("grid_connection_kw", 1000.0),
-        "pcs_cap_kw": st.session_state.get("pcs_shared_kw", 300.0),
-        "super_strings": st.session_state.get("super_strings", 2),
-        "dc_dc_modules_per_string": st.session_state.get("dc_dc_modules_per_string", 10),
-        "cable_imax_a": st.session_state.get("cable_imax_a", 0.0),
-        "vehicle_voltage_v": st.session_state.get("vehicle_voltage_v", 800.0),
-        "dispenser_max_kw": st.session_state.get("dispenser_max_kw", 0.0),
-        "battery_power_kw": st.session_state.get("battery_power_kw", 0.0),
-        "battery_energy_kwh": st.session_state.get("battery_energy_kwh", 0.0),
-        "battery_initial_soc_frac": st.session_state.get("battery_initial_soc_frac", 1.0),
-        "ac_inverter_kw": st.session_state.get("ac_inverter_kw", 0.0),
-        "qty_ac": st.session_state.get("qty_ac", 0),
-        "ac_kw": st.session_state.get("ac_kw", 0.0),
-        "qty_dc": st.session_state.get("qty_dc", 0),
-        "dc_kw": st.session_state.get("dc_kw", 0.0),
-        "tou_offpeak_per_kwh": st.session_state.get("tou_offpeak_per_kwh", 0.12),
-        "tou_shoulder_per_kwh": st.session_state.get("tou_shoulder_per_kwh", 0.20),
-        "tou_peak_per_kwh": st.session_state.get("tou_peak_per_kwh", 0.35),
-        "demand_charge_per_kw_month": st.session_state.get("demand_charge_per_kw_month", 0.0),
-        "util_curve": st.session_state.get("util_curve"),
-    }
+# ---- Layout ----
+cols = st.columns([1.2,1.5,1.5,1.2,1.2,1.2,1.5])
 
-st.title("Virtos Site Simulator")
+# Grid
+with cols[0]:
+    st.subheader("Grid")
+    grid_cap_kw = st.number_input("Grid cap (kW)", 0, 50000, 11380)
 
-tabs = st.tabs(["Simulator","Library","Diagnostics"])
-run_clicked = sidebar_runcontrol()
+# Dispensers
+with cols[1]:
+    st.subheader("Dispensers")
+    disp = st.data_editor(
+        {
+            "type":["CCS"],
+            "qty":[39],
+            "imax_a":[250],
+            "voltage_v":[800]
+        },
+        key="disp",
+        num_rows="dynamic",
+        hide_index=True
+    )
+    disp["per_unit_kw"] = disp.imax_a * disp.voltage_v / 1000
+    disp["nameplate_kw"] = disp.qty * disp.per_unit_kw
+    total_nameplate_kw = disp.nameplate_kw.sum()
+    st.metric("Installed fast charge (kW)", int(total_nameplate_kw))
 
-with tabs[0]:
-    render_topology_and_columns()
-    cfg = collect_cfg()
+# Vehicles & Utilisation
+with cols[2]:
+    st.subheader("Vehicles & Utilisation")
+    profile = st.selectbox("Profile", ["Depot","Custom"])
+    util = pd.DataFrame({
+        "t": range(96),
+        "utilisation": np.clip(np.sin(np.linspace(0,3.14,96)),0,1)
+    })
+    if profile=="Custom":
+        util = st.data_editor(util, key="util", hide_index=True)
+    st.line_chart(util.utilisation)
 
-    should_run = run_clicked or (st.session_state.get("autorun") and st.session_state.get("util_curve") is not None)
-    if should_run:
-        try:
-            st.session_state["last_result"] = run_engine(cfg)
-        except Exception as e:
-            st.error(f"Engine error: {e.__class__.__name__}: {e}")
+# PCS
+with cols[3]:
+    st.subheader("PCS")
+    pcs_kw = st.number_input("PCS (kW)", 0, 20000, 300)
 
+# Battery
+with cols[4]:
+    st.subheader("Battery")
+    batt_p = st.number_input("Battery power (kW)", 0, 20000, 200)
+    batt_e = st.number_input("Battery energy (kWh)", 0, 100000, 400)
+    soc0 = st.slider("Initial SOC", 0.0, 1.0, 0.5)
+
+# Charge Array
+with cols[5]:
+    st.subheader("Charge Array")
+    ss = st.number_input("Super-strings", 1, 20, 2)
+    dcdc = st.number_input("DC-DC / string", 1, 50, 10)
+    array_kw = ss*dcdc*100
+    st.metric("Array cap (kW)", array_kw)
+
+# Results
+with cols[6]:
     st.subheader("Results")
-    res = st.session_state.get("last_result")
-    if not res:
-        st.info("No results yet. Click Apply & Run.")
-    else:
-        s = res["summary"]
-        c1,c2,c3,c4 = st.columns(4)
-        c1.metric("Energy (kWh)", f"{s['energy_kwh']:.1f}")
-        c2.metric("Peak (kW)", f"{s['peak_kw']:.0f}")
-        c3.metric("Energy cost ($)", f"{s['energy_cost_$']:.2f}")
-        c4.metric("Power satisfied (%)", f"{s['power_satisfied_pct']:.1f}")
+    demand_kw = total_nameplate_kw * util.utilisation.values
+    served_kw = np.minimum(demand_kw, pcs_kw + batt_p)
+    st.metric("Peak demand (kW)", int(demand_kw.max()) if len(demand_kw)>0 else 0)
+    st.metric("Peak served (kW)", int(served_kw.max()) if len(served_kw)>0 else 0)
+    st.metric("Energy served (kWh/day)", round(served_kw.sum()*0.25,1))
 
-        ts = res["timeseries"].set_index("t")
-        st.line_chart(ts[["demand_kw","served_kw"]], height=220, width="stretch")
-        st.line_chart(ts[["grid_import_kw","unserved_kw"]], height=220, width="stretch")
-
-with tabs[1]:
-    render_library_tab()
-
-with tabs[2]:
-    render_diagnostics_tab()
+st.divider()
+st.subheader("Power Traces")
+st.line_chart(pd.DataFrame({
+    "Demand (kW)": demand_kw,
+    "Served (kW)": served_kw
+}))
