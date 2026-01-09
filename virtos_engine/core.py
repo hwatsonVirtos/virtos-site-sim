@@ -1,290 +1,322 @@
-"""Virtos site simulator engine (v1).
-
-Hard constraints enforced (per canonical handover + v1.4 delta):
-- Fixed timestep (default 0.25 h)
-- All flows obey hard caps (grid, PCS, DC-DC, cable cap at 800 V by default, dispenser cap)
-- AC-coupled BESS cannot bypass charger PCS
-- Virtos DC-coupled battery may bypass PCS to supply Charge Array
-
-Model note (v1):
-- Demand is an aggregate site-level utilisation envelope (0–1) applied to nameplate charging power.
-- No session simulation, no look-ahead allocation, deterministic proportional allocation.
-"""
-
 from __future__ import annotations
+from typing import Dict, List
 
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
-
-import numpy as np
-import pandas as pd
+from .schemas import SiteSpec, SuperStringSpec
 
 
-@dataclass(frozen=True)
-class Caps:
-    grid_kw: float
-    pcs_kw: float
-    array_kw: float
-    per_string_kw: float
-    batt_discharge_kw: float
-    batt_energy_kwh: float
-    inverter_kw: float
+def _site_nameplate_kw(site: SiteSpec) -> float:
+    return float(sum(d.nameplate_kw for d in site.dispensers))
 
 
-def _as_float(x, default=0.0) -> float:
-    try:
-        if x is None:
-            return float(default)
-        return float(x)
-    except Exception:
-        return float(default)
-
-
-def _as_int(x, default=0) -> int:
-    try:
-        if x is None:
-            return int(default)
-        return int(x)
-    except Exception:
-        return int(default)
-
-
-def _validate_util_curve(util_df, expected_n: int) -> np.ndarray:
-    if util_df is None:
-        return np.zeros(expected_n, dtype=float)
-    if isinstance(util_df, pd.DataFrame):
-        if "utilisation" not in util_df.columns:
-            return np.zeros(expected_n, dtype=float)
-        util = util_df["utilisation"].to_numpy(dtype=float)
-    else:
-        util = np.asarray(util_df, dtype=float)
-
-    if util.size == 0:
-        return np.zeros(expected_n, dtype=float)
-    if util.size != expected_n:
-        # No implicit resampling permitted. Clip/pad explicitly (deterministic).
-        util2 = np.zeros(expected_n, dtype=float)
-        m = min(expected_n, util.size)
-        util2[:m] = util[:m]
-        util = util2
-    util = np.clip(util, 0.0, 1.0)
-    return util
-
-
-def _nameplate_kw(cfg: dict) -> float:
-    qty_ac = _as_int(cfg.get("qty_ac"), 0)
-    ac_kw = _as_float(cfg.get("ac_kw"), 0.0)
-    qty_dc = _as_int(cfg.get("qty_dc"), 0)
-    dc_kw = _as_float(cfg.get("dc_kw"), 0.0)
-    return max(0.0, qty_ac * ac_kw + qty_dc * dc_kw)
-
-
-def _compute_caps(cfg: dict) -> Caps:
-    arch = str(cfg.get("architecture", "Virtos (DC-coupled)"))
-    grid_kw = max(0.0, _as_float(cfg.get("grid_connection_kw"), 0.0))
-    pcs_kw = max(0.0, _as_float(cfg.get("pcs_cap_kw"), 0.0))
-
-    # Charge array caps
-    strings = max(1, _as_int(cfg.get("super_strings"), 1))
-    modules_per = max(0, _as_int(cfg.get("dc_dc_modules_per_string"), 0))
-    dcdc_kw = modules_per * 100.0
-
-    v = max(0.0, _as_float(cfg.get("vehicle_voltage_v"), 800.0))
-    imax = max(0.0, _as_float(cfg.get("cable_imax_a"), 0.0))
-    cable_kw = (v * imax) / 1000.0
-    disp_kw = max(0.0, _as_float(cfg.get("dispenser_max_kw"), 0.0))
-    per_string_kw = max(0.0, min(dcdc_kw, cable_kw if cable_kw > 0 else dcdc_kw, disp_kw if disp_kw > 0 else dcdc_kw))
-    array_kw = per_string_kw * strings
-
-    batt_p = max(0.0, _as_float(cfg.get("battery_power_kw"), 0.0))
-    batt_e = max(0.0, _as_float(cfg.get("battery_energy_kwh"), 0.0))
-    inverter = max(0.0, _as_float(cfg.get("ac_inverter_kw"), 0.0))
-
-    # Enforce v1.4 bounds relationship where relevant
-    if "Virtos" in arch:
-        batt_p = min(batt_p, pcs_kw) if pcs_kw > 0 else 0.0
-    if "AC-coupled" in arch:
-        batt_p = min(batt_p, inverter) if inverter > 0 else 0.0
-
-    return Caps(
-        grid_kw=grid_kw,
-        pcs_kw=pcs_kw,
-        array_kw=array_kw,
-        per_string_kw=per_string_kw,
-        batt_discharge_kw=batt_p,
-        batt_energy_kwh=batt_e,
-        inverter_kw=inverter,
-    )
-
-
-def _tou_rate(hour: float, offpeak: float, shoulder: float, peak: float) -> float:
-    """Simple fixed TOU bands (placeholder).
-
-    Off-peak: 00:00–07:00
-    Shoulder: 07:00–16:00 and 21:00–24:00
-    Peak: 16:00–21:00
-    """
-    if hour < 7.0:
-        return offpeak
-    if 16.0 <= hour < 21.0:
-        return peak
-    return shoulder
-
-
-def run_engine(cfg: dict) -> dict:
-    timestep_h = _as_float(cfg.get("timestep_h"), 0.25)
-    if timestep_h <= 0:
-        timestep_h = 0.25
-
-    n = 96  # 24h @ 15 min (canonical v1)
-    util = _validate_util_curve(cfg.get("util_curve"), expected_n=n)
-
-    caps = _compute_caps(cfg)
-    arch = str(cfg.get("architecture", "Virtos (DC-coupled)"))
-
-    # Demand model
-    nameplate = _nameplate_kw(cfg)
-    demand_kw = util * nameplate
-
-    # Hard cap: charge array max throughput (DC-DC/cables/dispensers)
-    demand_after_array_cap = np.minimum(demand_kw, caps.array_kw)
-    unserved_array_kw = np.maximum(demand_kw - demand_after_array_cap, 0.0)
-
-    # Deterministic proportional allocation (v1.4 policy):
-    # We use equal per-string demand because utilisation is site-aggregate.
-    strings = max(1, _as_int(cfg.get("super_strings"), 1))
-    per_string_demand = demand_after_array_cap / strings
-    per_string_served_cap = np.minimum(per_string_demand, caps.per_string_kw)
-    demand_effective = per_string_served_cap * strings
-
-    # Battery state
-    soc0 = np.clip(_as_float(cfg.get("battery_initial_soc_frac"), 1.0), 0.0, 1.0)
-    soc_kwh = caps.batt_energy_kwh * soc0
-
-    served_kw = np.zeros(n, dtype=float)
-    grid_import_kw = np.zeros(n, dtype=float)
-    pcs_to_array_kw = np.zeros(n, dtype=float)
-    batt_to_array_kw = np.zeros(n, dtype=float)
-    soc_kwh_series = np.zeros(n, dtype=float)
-    binding: List[str] = []
-
-    for t in range(n):
-        d = float(demand_effective[t])
-
-        # Shared power ceiling through charger-side infrastructure
-        charger_side_cap = min(caps.pcs_kw if caps.pcs_kw > 0 else d, caps.array_kw if caps.array_kw > 0 else d)
-        if "Grid-only" in arch:
-            # Grid -> PCS -> Charge Array
-            p = min(d, caps.grid_kw if caps.grid_kw > 0 else d, charger_side_cap)
-            pcs_to_array_kw[t] = p
-            served_kw[t] = p
-            grid_import_kw[t] = p
-
-        elif "AC-coupled" in arch:
-            # Grid + BESS (through inverter) -> PCS -> Charge Array
-            # BESS cannot bypass PCS. Total through PCS is capped.
-            through_pcs_cap = charger_side_cap
-
-            g = min(d, caps.grid_kw if caps.grid_kw > 0 else d, through_pcs_cap)
-            remaining = max(d - g, 0.0)
-
-            # BESS discharge limited by inverter, battery power, SOC, and remaining PCS headroom.
-            headroom = max(through_pcs_cap - g, 0.0)
-            bess_max_energy_kw = soc_kwh / timestep_h if timestep_h > 0 else 0.0
-            b = min(remaining, headroom, caps.inverter_kw, caps.batt_discharge_kw, bess_max_energy_kw)
-
-            pcs_to_array_kw[t] = g + b
-            batt_to_array_kw[t] = b
-            served_kw[t] = g + b
-            grid_import_kw[t] = g
-            soc_kwh -= b * timestep_h
-
+def _tou_price_series(site: SiteSpec) -> List[float]:
+    curve_len = len(site.demand.utilisation_curve)
+    t = site.tariff
+    prices: List[float] = []
+    for i in range(curve_len):
+        if t.peak_start_idx <= i <= t.peak_end_idx:
+            prices.append(t.peak_price_per_kwh)
+        elif i in t.shoulder_indices:
+            prices.append(t.shoulder_price_per_kwh)
         else:
-            # Virtos (DC-coupled): Grid->PCS->Array plus Battery->Array bypass.
-            through_pcs_cap = min(caps.grid_kw if caps.grid_kw > 0 else d, caps.pcs_kw if caps.pcs_kw > 0 else d, caps.array_kw if caps.array_kw > 0 else d)
-            p = min(d, through_pcs_cap)
-            remaining = max(d - p, 0.0)
+            prices.append(t.offpeak_price_per_kwh)
+    return prices
 
-            batt_max_energy_kw = soc_kwh / timestep_h if timestep_h > 0 else 0.0
-            b = min(remaining, caps.batt_discharge_kw, batt_max_energy_kw)
+def _cost_from_grid_ts(grid_kw_ts: List[float], dt_hours: float, price_ts: List[float], demand_charge_per_kw_month: float) -> Dict[str, float]:
+    energy_kwh = sum(g * dt_hours for g in grid_kw_ts)
+    energy_cost = sum(g * dt_hours * p for g, p in zip(grid_kw_ts, price_ts))
+    peak_kw = max(grid_kw_ts) if grid_kw_ts else 0.0
+    demand_cost = peak_kw * demand_charge_per_kw_month
+    return {
+        "energy_kwh": energy_kwh,
+        "energy_cost_$": energy_cost,
+        "peak_kw": peak_kw,
+        "demand_cost_$": demand_cost,
+        "total_cost_$": energy_cost + demand_cost,
+    }
 
-            pcs_to_array_kw[t] = p
-            batt_to_array_kw[t] = b
-            served_kw[t] = p + b
-            grid_import_kw[t] = p
-            soc_kwh -= b * timestep_h
+def simulate_virtos(site: SiteSpec) -> Dict:
+    dt = site.demand.dt_hours
+    curve = site.demand.utilisation_curve
+    price_ts = _tou_price_series(site)
 
-        soc_kwh = float(np.clip(soc_kwh, 0.0, caps.batt_energy_kwh))
-        soc_kwh_series[t] = soc_kwh
+    superstrings = [
+        SuperStringSpec(
+            name=f"SS{i+1}",
+            pcs_sku=site.pcs_sku,
+            battery_sku=site.battery_sku,
+            dcdc_modules=site.dcdc_modules,
+            cable_type=site.cable_type,
+        )
+        for i in range(site.n_superstrings)
+    ]
 
-    unserved_kw = np.maximum(demand_effective - served_kw, 0.0) + unserved_array_kw
-
-    # Binding constraints (coarse): detect if any cap frequently active
-    if np.any(demand_kw > caps.array_kw + 1e-9):
-        binding.append("Charge Array cap (DC-DC/cable/dispenser)")
-    if caps.grid_kw > 0 and np.any(grid_import_kw >= caps.grid_kw - 1e-6):
-        binding.append("Grid connection cap")
-    if caps.pcs_kw > 0 and np.any(pcs_to_array_kw >= caps.pcs_kw - 1e-6):
-        binding.append("PCS cap")
-    if caps.batt_discharge_kw > 0 and np.any(batt_to_array_kw >= caps.batt_discharge_kw - 1e-6):
-        binding.append("Battery power cap")
-    if caps.batt_energy_kwh > 0 and np.any(soc_kwh_series <= 1e-6) and np.any(batt_to_array_kw > 0):
-        binding.append("Battery energy (SOC) cap")
-    if "AC-coupled" in arch and caps.inverter_kw > 0 and np.any(batt_to_array_kw >= caps.inverter_kw - 1e-6):
-        binding.append("AC inverter cap")
-
-    # Costs (OpEx only; placeholders)
-    off = _as_float(cfg.get("tou_offpeak_per_kwh"), 0.0)
-    sh = _as_float(cfg.get("tou_shoulder_per_kwh"), 0.0)
-    pk = _as_float(cfg.get("tou_peak_per_kwh"), 0.0)
-    demand_charge = _as_float(cfg.get("demand_charge_per_kw_month"), 0.0)
-
-    hours = np.arange(n) * timestep_h
-    rates = np.array([_tou_rate(float(h), off, sh, pk) for h in hours], dtype=float)
-    energy_cost = float(np.sum(grid_import_kw * timestep_h * rates))
-    demand_cost = float(np.max(grid_import_kw) * demand_charge)
-
-    energy_kwh = float(np.sum(served_kw) * timestep_h)
-    peak_kw = float(np.max(served_kw) if served_kw.size else 0.0)
-    sat = float(np.sum(served_kw) / np.sum(demand_kw)) if float(np.sum(demand_kw)) > 0 else 0.0
-
-    ts = pd.DataFrame(
-        {
-            "t": np.arange(n),
-            "hour": hours,
-            "utilisation": util,
-            "nameplate_kw": nameplate,
-            "demand_kw": demand_kw,
-            "demand_effective_kw": demand_effective,
-            "served_kw": served_kw,
-            "grid_import_kw": grid_import_kw,
-            "pcs_to_array_kw": pcs_to_array_kw,
-            "battery_to_array_kw": batt_to_array_kw,
-            "battery_soc_kwh": soc_kwh_series,
-            "unserved_kw": unserved_kw,
-            "unserved_array_kw": unserved_array_kw,
+    state: Dict[str, Dict] = {}
+    for ss in superstrings:
+        d = ss.derived()
+        state[ss.name] = {
+            "derived": d,
+            "soc_kwh": d["battery_kwh"],
+            "soc_ts_kwh": [],
+            "battery_discharge_kw_ts": [],
+            "battery_charge_kw_ts": [],
+            "pcs_alloc_kw_ts": [],
+            "delivered_kw_ts": [],
+            "demand_kw_ts": [],
         }
+
+    pcs_used_ts: List[float] = []
+    grid_import_ts: List[float] = []
+    energy_not_served_kwh = 0.0
+
+    effective_site_pcs_cap = float(min(site.shared_pcs_kw, site.grid_connection_kw))
+
+    for u in curve:
+        pcs_requests: Dict[str, float] = {}
+
+        # Serve each string with battery first, then request PCS
+        for ss in superstrings:
+            s = state[ss.name]
+            d = s["derived"]
+
+            demand_kw = u * d["cable_kw"]
+            deliverable_kw = min(demand_kw, d["dcdc_kw"], d["cable_kw"])
+
+            batt_energy_limit_kw = (s["soc_kwh"] / dt) if s["soc_kwh"] > 0 else 0.0
+            batt_discharge_kw = min(deliverable_kw, d["battery_kw"], batt_energy_limit_kw)
+
+            s["soc_kwh"] = max(s["soc_kwh"] - batt_discharge_kw * dt, 0.0)
+
+            remaining_kw = deliverable_kw - batt_discharge_kw
+            pcs_request_kw = min(remaining_kw, d["pcs_kw"])
+
+            pcs_requests[ss.name] = pcs_request_kw
+
+            s["demand_kw_ts"].append(demand_kw)
+            s["battery_discharge_kw_ts"].append(batt_discharge_kw)
+            s["battery_charge_kw_ts"].append(0.0)
+            s["soc_ts_kwh"].append(s["soc_kwh"])
+
+        total_request = sum(pcs_requests.values())
+        cap = effective_site_pcs_cap
+
+        if total_request <= cap:
+            allocations = pcs_requests
+            pcs_used_for_load = total_request
+        else:
+            allocations = {k: (pcs_requests[k] / total_request) * cap for k in pcs_requests}
+            pcs_used_for_load = cap
+
+        for ss in superstrings:
+            s = state[ss.name]
+            demand_kw = s["demand_kw_ts"][-1]
+            pcs_kw = allocations[ss.name]
+            delivered_kw = s["battery_discharge_kw_ts"][-1] + pcs_kw
+
+            s["pcs_alloc_kw_ts"].append(pcs_kw)
+            s["delivered_kw_ts"].append(delivered_kw)
+
+            if delivered_kw < demand_kw:
+                energy_not_served_kwh += (demand_kw - delivered_kw) * dt
+
+        # Optional: grid charge into batteries with spare cap
+        pcs_used_total = pcs_used_for_load
+        if site.allow_grid_charge:
+            spare_kw = max(cap - pcs_used_for_load, 0.0)
+            spare_kw = min(spare_kw, float(site.grid_charge_power_kw))
+
+            if spare_kw > 0:
+                targets: Dict[str, float] = {}
+                for ss in superstrings:
+                    s = state[ss.name]
+                    d = s["derived"]
+                    soc_target_kwh = d["battery_kwh"] * (float(site.grid_charge_target_soc_pct) / 100.0)
+                    if s["soc_kwh"] < soc_target_kwh:
+                        targets[ss.name] = soc_target_kwh - s["soc_kwh"]
+
+                total_need = sum(targets.values())
+                if total_need > 0:
+                    for ss in superstrings:
+                        s = state[ss.name]
+                        d = s["derived"]
+                        if ss.name in targets:
+                            share = targets[ss.name] / total_need
+                            charge_kw = spare_kw * share
+                            charge_kw = min(charge_kw, d["battery_kw"])
+                            headroom_kw = (targets[ss.name] / dt) if dt > 0 else 0.0
+                            charge_kw = min(charge_kw, headroom_kw)
+
+                            s["soc_kwh"] = min(s["soc_kwh"] + charge_kw * dt, d["battery_kwh"])
+                            s["battery_charge_kw_ts"][-1] = charge_kw
+                            s["soc_ts_kwh"][-1] = s["soc_kwh"]
+                            pcs_used_total += charge_kw
+
+        pcs_used_ts.append(pcs_used_total)
+        grid_import_ts.append(pcs_used_total)
+
+    costs = _cost_from_grid_ts(grid_import_ts, dt, price_ts, site.tariff.demand_charge_per_kw_month)
+
+    total_demand_kwh = sum(s["demand_kw_ts"][i] * dt for s in state.values() for i in range(len(curve)))
+    total_delivered_kwh = sum(s["delivered_kw_ts"][i] * dt for s in state.values() for i in range(len(curve)))
+    time_satisfied = sum(
+        1 for s in state.values() for i in range(len(curve))
+        if s["delivered_kw_ts"][i] >= s["demand_kw_ts"][i]
     )
+    total_steps = len(curve) * len(state)
+
+    metrics = {
+        "time_satisfied_pct": (time_satisfied / total_steps) * 100.0 if total_steps else 0.0,
+        "power_satisfied_pct": (total_delivered_kwh / total_demand_kwh) * 100.0 if total_demand_kwh > 0 else 0.0,
+        "energy_not_served_kwh": energy_not_served_kwh,
+    }
 
     return {
-        "constraints": {
-            "timestep_h": timestep_h,
-            "grid_connection_kw": caps.grid_kw,
-            "pcs_cap_kw": caps.pcs_kw,
-            "array_cap_kw": caps.array_kw,
-            "per_string_cap_kw": caps.per_string_kw,
-            "battery_power_kw": caps.batt_discharge_kw,
-            "battery_energy_kwh": caps.batt_energy_kwh,
-            "ac_inverter_kw": caps.inverter_kw,
+        "site": {
+            "shared_pcs_kw": site.shared_pcs_kw,
+            "grid_connection_kw": site.grid_connection_kw,
+            "effective_site_pcs_cap_kw": effective_site_pcs_cap,
+            "allow_grid_charge": site.allow_grid_charge,
+            "grid_charge_target_soc_pct": site.grid_charge_target_soc_pct,
+            "grid_charge_power_kw": site.grid_charge_power_kw,
         },
-        "binding_constraints": binding,
-        "summary": {
-            "architecture": arch,
-            "energy_kwh": energy_kwh,
-            "peak_kw": peak_kw,
-            "energy_cost_$": energy_cost,
-            "demand_charge_cost_$": demand_cost,
-            "power_satisfied_pct": float(100.0 * sat),
+        "state": state,
+        "timeseries": {
+            "pcs_used_kw_ts": pcs_used_ts,
+            "grid_import_kw_ts": grid_import_ts,
         },
-        "timeseries": ts,
+        "metrics": metrics,
+        "costs": costs,
+    }
+
+def simulate_grid_only(site: SiteSpec) -> Dict:
+    dt = site.demand.dt_hours
+    curve = site.demand.utilisation_curve
+    price_ts = _tou_price_series(site)
+
+    ss = SuperStringSpec(
+        name="SS",
+        pcs_sku=site.pcs_sku,
+        battery_sku=site.battery_sku,
+        dcdc_modules=site.dcdc_modules,
+        cable_type=site.cable_type,
+    )
+    d = ss.derived()
+
+    demand_kw_ts: List[float] = []
+    grid_import_kw_ts: List[float] = []
+    delivered_kw_ts: List[float] = []
+    energy_not_served_kwh = 0.0
+
+    charger_cap_kw = d["pcs_kw"] * site.n_superstrings
+    cable_cap_kw = d["cable_kw"] * site.n_superstrings
+    dcdc_cap_kw = d["dcdc_kw"] * site.n_superstrings
+    grid_cap_kw = float(site.grid_connection_kw)
+
+    for u in curve:
+        demand_kw = u * cable_cap_kw
+        deliverable_kw = min(demand_kw, cable_cap_kw, dcdc_cap_kw, charger_cap_kw)
+
+        grid_kw = min(deliverable_kw, grid_cap_kw)
+        delivered_kw = grid_kw
+
+        if delivered_kw < demand_kw:
+            energy_not_served_kwh += (demand_kw - delivered_kw) * dt
+
+        demand_kw_ts.append(demand_kw)
+        grid_import_kw_ts.append(grid_kw)
+        delivered_kw_ts.append(delivered_kw)
+
+    costs = _cost_from_grid_ts(grid_import_kw_ts, dt, price_ts, site.tariff.demand_charge_per_kw_month)
+
+    total_demand_kwh = sum(d * dt for d in demand_kw_ts)
+    total_delivered_kwh = sum(d * dt for d in delivered_kw_ts)
+    time_satisfied = sum(1 for i in range(len(curve)) if delivered_kw_ts[i] >= demand_kw_ts[i])
+
+    metrics = {
+        "time_satisfied_pct": (time_satisfied / len(curve)) * 100.0 if curve else 0.0,
+        "power_satisfied_pct": (total_delivered_kwh / total_demand_kwh) * 100.0 if total_demand_kwh > 0 else 0.0,
+        "energy_not_served_kwh": energy_not_served_kwh,
+    }
+
+    return {
+        "site": {"grid_connection_kw": grid_cap_kw},
+        "timeseries": {
+            "grid_import_kw_ts": grid_import_kw_ts,
+            "demand_kw_ts": demand_kw_ts,
+        },
+        "metrics": metrics,
+        "costs": costs,
+    }
+
+def simulate_ac_coupled(site: SiteSpec) -> Dict:
+    dt = site.demand.dt_hours
+    curve = site.demand.utilisation_curve
+    price_ts = _tou_price_series(site)
+
+    ss = SuperStringSpec(
+        name="SS",
+        pcs_sku=site.pcs_sku,
+        battery_sku=site.battery_sku,
+        dcdc_modules=site.dcdc_modules,
+        cable_type=site.cable_type,
+    )
+    d = ss.derived()
+
+    charger_cap_kw = d["pcs_kw"] * site.n_superstrings
+    cable_cap_kw = d["cable_kw"] * site.n_superstrings
+    dcdc_cap_kw = d["dcdc_kw"] * site.n_superstrings
+    grid_cap_kw = float(site.grid_connection_kw)
+
+    bess_power_kw = float(site.ac_bess_power_kw)
+    bess_energy_kwh = float(site.ac_bess_energy_kwh)
+    bess_soc_kwh = bess_energy_kwh
+
+    grid_import_kw_ts: List[float] = []
+    bess_discharge_kw_ts: List[float] = []
+    demand_kw_ts: List[float] = []
+    delivered_kw_ts: List[float] = []
+    energy_not_served_kwh = 0.0
+
+    for u in curve:
+        demand_kw = u * cable_cap_kw
+        deliverable_kw = min(demand_kw, cable_cap_kw, dcdc_cap_kw, charger_cap_kw)
+
+        bess_energy_limit_kw = (bess_soc_kwh / dt) if bess_soc_kwh > 0 else 0.0
+        bess_kw = min(deliverable_kw, bess_power_kw, bess_energy_limit_kw)
+
+        bess_soc_kwh = max(bess_soc_kwh - bess_kw * dt, 0.0)
+
+        remaining_kw = deliverable_kw - bess_kw
+        grid_import_kw = min(remaining_kw, grid_cap_kw)
+
+        delivered_kw = bess_kw + grid_import_kw
+
+        if delivered_kw < demand_kw:
+            energy_not_served_kwh += (demand_kw - delivered_kw) * dt
+
+        demand_kw_ts.append(demand_kw)
+        bess_discharge_kw_ts.append(bess_kw)
+        grid_import_kw_ts.append(grid_import_kw)
+        delivered_kw_ts.append(delivered_kw)
+
+    costs = _cost_from_grid_ts(grid_import_kw_ts, dt, price_ts, site.tariff.demand_charge_per_kw_month)
+
+    total_demand_kwh = sum(d * dt for d in demand_kw_ts)
+    total_delivered_kwh = sum(d * dt for d in delivered_kw_ts)
+    time_satisfied = sum(1 for i in range(len(curve)) if delivered_kw_ts[i] >= demand_kw_ts[i])
+
+    metrics = {
+        "time_satisfied_pct": (time_satisfied / len(curve)) * 100.0 if curve else 0.0,
+        "power_satisfied_pct": (total_delivered_kwh / total_demand_kwh) * 100.0 if total_demand_kwh > 0 else 0.0,
+        "energy_not_served_kwh": energy_not_served_kwh,
+    }
+
+    return {
+        "site": {"grid_connection_kw": grid_cap_kw, "ac_bess_power_kw": bess_power_kw, "ac_bess_energy_kwh": bess_energy_kwh},
+        "timeseries": {
+            "grid_import_kw_ts": grid_import_kw_ts,
+            "bess_discharge_kw_ts": bess_discharge_kw_ts,
+            "demand_kw_ts": demand_kw_ts,
+        },
+        "metrics": metrics,
+        "costs": costs,
     }

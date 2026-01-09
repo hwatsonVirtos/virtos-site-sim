@@ -1,90 +1,170 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(layout="wide", page_title="Virtos Site Simulator v1")
+from virtos_engine.schemas import (
+    SiteSpec, DemandProfile, TariffSpec, SuperStringSpec,
+    DispenserTypeSpec, VehicleRevenueSpec
+)
+from virtos_engine.core import run_engine
+from virtos_ui.library import render_library_tab
+from virtos_ui.diagnostics import render_diagnostics_tab
+from virtos_ui.powerflow import render_powerflow_strip
+from virtos_ui.utilisation import render_utilisation_editor
+from virtos_ui.dispensers import render_dispensers_table
+from virtos_ui.blocks import render_metric_card
 
-st.markdown("""
+st.set_page_config(page_title="Virtos Site Simulator (v1 DC-only)", layout="wide")
+
+# ---- Theme: Virtos green highlights ----
+VIRTOS_GREEN = "#7ED957"  # Pantone 376C approx for web
+st.markdown(f"""
 <style>
-:root { --virtos-green:#7ED957; }
-h1,h2,h3 { color: var(--virtos-green); }
+:root {{ --virtos-green:{VIRTOS_GREEN}; }}
+h1,h2,h3 {{ color: var(--virtos-green); }}
+div[data-testid="stMetricLabel"] p {{ color: var(--virtos-green) !important; }}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Virtos Site Simulator — DC Only (v1)")
+st.title("Virtos Site Simulator — Virtos DC Only (v1)")
 
-# ---- Layout ----
-cols = st.columns([1.2,1.5,1.5,1.2,1.2,1.2,1.5])
+tabs = st.tabs(["Simulator (Virtos)", "Component Library", "Diagnostics", "Other Architectures (v1.5+)"])
 
-# Grid
-with cols[0]:
-    st.subheader("Grid")
-    grid_cap_kw = st.number_input("Grid cap (kW)", 0, 50000, 11380)
+with tabs[0]:
+    # --- Top: Site configuration ---
+    st.subheader("Site configuration")
 
-# Dispensers
-with cols[1]:
-    st.subheader("Dispensers")
-    disp = st.data_editor(
-        {
-            "type":["CCS"],
-            "qty":[39],
-            "imax_a":[250],
-            "voltage_v":[800]
-        },
-        key="disp",
-        num_rows="dynamic",
-        hide_index=True
+    # 7-column spine: Utility&Tariff, Grid, Dispensers, Vehicles/Utilisation/Revenue, PCS, Battery, Charge Array
+    cols = st.columns([1.2,1.1,1.6,1.8,1.1,1.2,1.2], gap="small")
+
+    with cols[0]:
+        st.markdown("#### Utility & energy costs")
+        offpeak = st.number_input("Off-peak ($/kWh)", 0.0, 5.0, 0.12, key="tou_offpeak")
+        shoulder = st.number_input("Shoulder ($/kWh)", 0.0, 5.0, 0.20, key="tou_shoulder")
+        peak = st.number_input("Peak ($/kWh)", 0.0, 5.0, 0.35, key="tou_peak")
+        demand_charge = st.number_input("Demand charge ($/kW/month)", 0.0, 500.0, 20.0, key="demand_charge")
+
+    with cols[1]:
+        st.markdown("#### Grid connection")
+        grid_kw = st.number_input("Grid cap (kW)", 0.0, 200000.0, 11380.0, step=10.0, key="grid_kw")
+
+    with cols[2]:
+        st.markdown("#### Dispensers")
+        disp_df, disp_summary = render_dispensers_table(key_prefix="disp")
+        render_metric_card("Installed fast-charge", [
+            f"Total: {disp_summary['total_units']} units",
+            f"Cap: {disp_summary['total_nameplate_kw']:.0f} kW"
+        ])
+
+    with cols[3]:
+        st.markdown("#### Vehicles, utilisation & revenue")
+        util_curve = render_utilisation_editor(key_prefix="util")
+        price_kwh = st.number_input("Revenue ($/kWh)", 0.0, 10.0, 0.65, key="rev_kwh")
+        price_min = st.number_input("Revenue ($/min)", 0.0, 10.0, 0.0, key="rev_min")
+        render_metric_card("Demand input", [
+            "Utilisation: 0–1",
+            f"Timesteps: {len(util_curve)} × 15 min"
+        ])
+
+    # --- Bottom: Virtos implementation ---
+    st.subheader("Virtos implementation")
+
+    with cols[4]:
+        st.markdown("#### PCS")
+        pcs_shared_kw = st.number_input("Shared PCS cap (kW)", 0.0, 200000.0, 3000.0, step=10.0, key="pcs_kw")
+
+    with cols[5]:
+        st.markdown("#### Battery")
+        batt_power_kw = st.number_input("Battery power (kW)", 0.0, 200000.0, 2000.0, step=10.0, key="batt_p")
+        batt_energy_kwh = st.number_input("Battery energy (kWh)", 0.0, 1000000.0, 8000.0, step=50.0, key="batt_e")
+        soc0 = st.slider("Initial SOC", 0.0, 1.0, 0.5, key="soc0")
+
+    with cols[6]:
+        st.markdown("#### Charge Array")
+        n_super = st.number_input("Super-strings", 1, 50, 2, step=1, key="n_super")
+        dcdc_per = st.number_input("DC-DC per string", 1, 200, 10, step=1, key="dcdc_per")
+        array_cap_kw = float(n_super * dcdc_per * 100.0)
+        render_metric_card("Array cap", [f"{array_cap_kw:.0f} kW"])
+
+    # ---- Run engine ----
+    # Build dispenser type specs
+    disp_types = []
+    for _, r in disp_df.iterrows():
+        disp_types.append(DispenserTypeSpec(
+            name=str(r["name"]),
+            connector=str(r["connector"]),
+            qty=int(r["qty"]),
+            imax_a=float(r["imax_a"]),
+            voltage_v=800.0
+        ))
+
+    # Demand profile
+    demand = DemandProfile(utilisation_curve=[float(x) for x in util_curve], timestep_minutes=15)
+
+    # Tariff (simplified time-of-use, indices kept generic)
+    tariff = TariffSpec(
+        offpeak_price_per_kwh=float(offpeak),
+        shoulder_price_per_kwh=float(shoulder),
+        peak_price_per_kwh=float(peak),
+        demand_charge_per_kw_month=float(demand_charge),
+        peak_start_idx=48, peak_end_idx=72,
+        shoulder_indices=list(range(36,48)) + list(range(72,84))
     )
-    disp["per_unit_kw"] = disp.imax_a * disp.voltage_v / 1000
-    disp["nameplate_kw"] = disp.qty * disp.per_unit_kw
-    total_nameplate_kw = disp.nameplate_kw.sum()
-    st.metric("Installed fast charge (kW)", int(total_nameplate_kw))
 
-# Vehicles & Utilisation
-with cols[2]:
-    st.subheader("Vehicles & Utilisation")
-    profile = st.selectbox("Profile", ["Depot","Custom"])
-    util = pd.DataFrame({
-        "t": range(96),
-        "utilisation": np.clip(np.sin(np.linspace(0,3.14,96)),0,1)
-    })
-    if profile=="Custom":
-        util = st.data_editor(util, key="util", hide_index=True)
-    st.line_chart(util.utilisation)
+    # Revenue spec
+    revenue = VehicleRevenueSpec(price_per_kwh=float(price_kwh), price_per_min=float(price_min))
 
-# PCS
-with cols[3]:
-    st.subheader("PCS")
-    pcs_kw = st.number_input("PCS (kW)", 0, 20000, 300)
+    ss_specs = []
+    for i in range(int(n_super)):
+        ss_specs.append(SuperStringSpec(
+            name=f"SS{i+1}",
+            pcs_kw=float(pcs_shared_kw),  # site cap handled in engine
+            battery_power_kw=float(batt_power_kw),
+            battery_energy_kwh=float(batt_energy_kwh),
+            dc_dc_modules=int(dcdc_per),
+            initial_soc=float(soc0),
+        ))
 
-# Battery
-with cols[4]:
-    st.subheader("Battery")
-    batt_p = st.number_input("Battery power (kW)", 0, 20000, 200)
-    batt_e = st.number_input("Battery energy (kWh)", 0, 100000, 400)
-    soc0 = st.slider("Initial SOC", 0.0, 1.0, 0.5)
+    site = SiteSpec(
+        grid_connection_kw=float(grid_kw),
+        pcs_shared_kw=float(pcs_shared_kw),
+        demand=demand,
+        tariff=tariff,
+        dispensers=disp_types,
+        revenue=revenue,
+        superstrings=ss_specs,
+    )
 
-# Charge Array
-with cols[5]:
-    st.subheader("Charge Array")
-    ss = st.number_input("Super-strings", 1, 20, 2)
-    dcdc = st.number_input("DC-DC / string", 1, 50, 10)
-    array_kw = ss*dcdc*100
-    st.metric("Array cap (kW)", array_kw)
+    result = run_engine(site)
 
-# Results
-with cols[6]:
+    # ---- Power flow strip (aligned to columns) ----
+    render_powerflow_strip(
+        grid_kw=float(grid_kw),
+        pcs_kw=float(pcs_shared_kw),
+        batt_kw=float(batt_power_kw),
+        batt_kwh=float(batt_energy_kwh),
+        array_kw=array_cap_kw,
+        disp_kw=float(disp_summary["total_nameplate_kw"]),
+        binding=result.get("binding_constraints", [])
+    )
+
+    # ---- Results (not full-width hijack) ----
     st.subheader("Results")
-    demand_kw = total_nameplate_kw * util.utilisation.values
-    served_kw = np.minimum(demand_kw, pcs_kw + batt_p)
-    st.metric("Peak demand (kW)", int(demand_kw.max()) if len(demand_kw)>0 else 0)
-    st.metric("Peak served (kW)", int(served_kw.max()) if len(served_kw)>0 else 0)
-    st.metric("Energy served (kWh/day)", round(served_kw.sum()*0.25,1))
+    m = result["metrics"]
+    rcols = st.columns(4)
+    rcols[0].metric("Peak demand (kW)", f"{m['peak_demand_kw']:.0f}")
+    rcols[1].metric("Peak served (kW)", f"{m['peak_served_kw']:.0f}")
+    rcols[2].metric("Energy served (kWh/day)", f"{m['energy_served_kwh']:.0f}")
+    rcols[3].metric("Power satisfied (%)", f"{m['power_satisfied_pct']:.1f}")
 
-st.divider()
-st.subheader("Power Traces")
-st.line_chart(pd.DataFrame({
-    "Demand (kW)": demand_kw,
-    "Served (kW)": served_kw
-}))
+    with st.expander("Detailed power traces", expanded=False):
+        st.line_chart(pd.DataFrame(result["timeseries"]))
+
+with tabs[1]:
+    render_library_tab()
+
+with tabs[2]:
+    render_diagnostics_tab()
+
+with tabs[3]:
+    st.info("Grid-only and AC-coupled comparisons are intentionally out of scope for v1.\n\nThey will be implemented in a separate tab in v1.5+.")

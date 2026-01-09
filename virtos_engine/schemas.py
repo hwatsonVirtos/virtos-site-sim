@@ -15,9 +15,8 @@ BATTERY_LIBRARY: Dict[str, Dict[str, float]] = {
 }
 
 CABLE_LIBRARY: Dict[str, Dict[str, float]] = {
-    "CABLE_375A": {"amps": 375.0},
-    "CABLE_600A": {"amps": 600.0},
-    "CABLE_1500A": {"amps": 1500.0},
+    "500A": {"amps": 500.0},
+    "800A": {"amps": 800.0},
 }
 
 @dataclass
@@ -45,7 +44,7 @@ class SuperStringSpec:
     pcs_sku: str = "PCS_500"
     battery_sku: str = "BATT_500_1000"
     dcdc_modules: int = 10
-    cable_type: str = "CABLE_600A"
+    cable_type: str = "500A"
 
     def derived(self) -> Dict[str, float]:
         pcs_kw = PCS_LIBRARY[self.pcs_sku]
@@ -62,6 +61,8 @@ class SuperStringSpec:
 
 @dataclass
 class SiteSpec:
+    dispensers: List[DispenserTypeSpec] = field(default_factory=list)
+    revenue: VehicleRevenueSpec = field(default_factory=VehicleRevenueSpec)
     name: str = "Site"
     demand: DemandProfile = field(default_factory=DemandProfile)
     n_superstrings: int = 2
@@ -76,7 +77,7 @@ class SiteSpec:
     pcs_sku: str = "PCS_500"
     battery_sku: str = "BATT_500_1000"
     dcdc_modules: int = 10
-    cable_type: str = "CABLE_600A"
+    cable_type: str = "500A"
 
     # Virtos v1.1: optional grid charging using spare import/PCS headroom
     allow_grid_charge: bool = False
@@ -88,3 +89,28 @@ class SiteSpec:
     ac_bess_energy_kwh: float = 0.0
 
     tariff: TariffSpec = field(default_factory=TariffSpec)
+
+
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class DispenserTypeSpec:
+    name: str
+    connector: str  # 'CCS' or 'MCS'
+    qty: int
+    imax_a: float
+    voltage_v: float = VEHICLE_VOLTAGE_V
+
+    @property
+    def per_unit_kw(self) -> float:
+        return (self.voltage_v * self.imax_a) / 1000.0
+
+    @property
+    def nameplate_kw(self) -> float:
+        return self.qty * self.per_unit_kw
+
+@dataclass
+class VehicleRevenueSpec:
+    price_per_kwh: float = 0.0
+    price_per_min: float = 0.0
