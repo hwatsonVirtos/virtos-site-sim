@@ -18,4 +18,15 @@ def render_diagnostics_tab():
             rows.append({"module": mod, "attr": attr, "status": "OK" if ok else "MISSING_ATTR"})
         except Exception as e:
             rows.append({"module": mod, "attr": attr, "status": f"IMPORT_FAIL: {e.__class__.__name__}: {e}"})
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
+
+    st.subheader("Last run (engine outputs)")
+    res = st.session_state.get("last_result")
+    if not res:
+        st.info("No engine run yet.")
+        return
+    st.json({
+        "constraints": res.get("constraints"),
+        "binding_constraints": res.get("binding_constraints"),
+        "summary": res.get("summary"),
+    }, expanded=False)
