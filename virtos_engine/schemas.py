@@ -1,116 +1,130 @@
+from __future__ import annotations
+
+"""Lightweight schemas for the Streamlit UI and simple sizing engine.
+
+Important: Streamlit Cloud currently runs Python 3.13.
+To avoid runtime NameErrors from forward-referenced type annotations
+in dataclasses, we enable postponed evaluation via `from __future__ import annotations`.
+"""
+
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import Dict, List
 
-VEHICLE_VOLTAGE_V = 800
-DC_DC_MODULE_KW = 100
-
-PCS_LIBRARY: Dict[str, float] = {
-    "PCS_500": 500.0,
-    "PCS_1000": 1000.0,
-}
-
-BATTERY_LIBRARY: Dict[str, Dict[str, float]] = {
-    "BATT_500_1000": {"power_kw": 500.0, "energy_kwh": 1000.0},
-    "BATT_1000_2000": {"power_kw": 1000.0, "energy_kwh": 2000.0},
-}
-
-CABLE_LIBRARY: Dict[str, Dict[str, float]] = {
-    "500A": {"amps": 500.0},
-    "800A": {"amps": 800.0},
-}
-
-@dataclass
-class TariffSpec:
-    offpeak_price_per_kwh: float = 0.12
-    shoulder_price_per_kwh: float = 0.20
-    peak_price_per_kwh: float = 0.35
-    demand_charge_per_kw_month: float = 25.0
-    peak_start_idx: int = 3
-    peak_end_idx: int = 8
-    shoulder_indices: List[int] = field(default_factory=lambda: [2, 9])
 
 @dataclass
 class DemandProfile:
-    utilisation_curve: List[float] = field(default_factory=lambda: [0.2,0.4,0.6,0.8,1.0,0.8,0.6,0.4])
+    """Aggregate utilisation envelope (behavioural), 0..1, typically 96 rows for 24h at 15m."""
+
+    # 96 values in [0,1]
+    utilisation: List[float] = field(default_factory=list)
     timestep_minutes: int = 15
 
-    @property
-    def dt_hours(self) -> float:
-        return self.timestep_minutes / 60.0
-
-@dataclass
-class SuperStringSpec:
-    name: str
-    pcs_sku: str = "PCS_500"
-    battery_sku: str = "BATT_500_1000"
-    dcdc_modules: int = 10
-    cable_type: str = "500A"
-
-    def derived(self) -> Dict[str, float]:
-        pcs_kw = PCS_LIBRARY[self.pcs_sku]
-        batt = BATTERY_LIBRARY[self.battery_sku]
-        amps = CABLE_LIBRARY[self.cable_type]["amps"]
-        cable_kw = amps * VEHICLE_VOLTAGE_V / 1000.0
+    def to_dict(self) -> Dict:
         return {
-            "pcs_kw": float(pcs_kw),
-            "battery_kw": float(batt["power_kw"]),
-            "battery_kwh": float(batt["energy_kwh"]),
-            "dcdc_kw": float(self.dcdc_modules * DC_DC_MODULE_KW),
-            "cable_kw": float(cable_kw),
+            "timestep_minutes": self.timestep_minutes,
+            "utilisation": list(self.utilisation),
         }
 
+
 @dataclass
-class SiteSpec:
-    dispensers: List[DispenserTypeSpec] = field(default_factory=list)
-    revenue: VehicleRevenueSpec = field(default_factory=VehicleRevenueSpec)
-    name: str = "Site"
-    demand: DemandProfile = field(default_factory=DemandProfile)
-    n_superstrings: int = 2
+class TariffSpec:
+    offpeak_per_kwh: float = 0.12
+    shoulder_per_kwh: float = 0.20
+    peak_per_kwh: float = 0.35
+    demand_charge_per_kw_month: float = 0.0
 
-    # Site import cap
-    grid_connection_kw: float = 1000.0
+    def to_dict(self) -> Dict:
+        return {
+            "offpeak_per_kwh": self.offpeak_per_kwh,
+            "shoulder_per_kwh": self.shoulder_per_kwh,
+            "peak_per_kwh": self.peak_per_kwh,
+            "demand_charge_per_kw_month": self.demand_charge_per_kw_month,
+        }
 
-    # Virtos: shared PCS cap across strings (hard cap) — effective cap is min(shared PCS, grid cap)
-    shared_pcs_kw: float = 300.0
-
-    # Charger-side selections
-    pcs_sku: str = "PCS_500"
-    battery_sku: str = "BATT_500_1000"
-    dcdc_modules: int = 10
-    cable_type: str = "500A"
-
-    # Virtos v1.1: optional grid charging using spare import/PCS headroom
-    allow_grid_charge: bool = False
-    grid_charge_target_soc_pct: float = 100.0
-    grid_charge_power_kw: float = 200.0
-
-    # AC-coupled competitor: grid-side BESS behind meter
-    ac_bess_power_kw: float = 0.0
-    ac_bess_energy_kwh: float = 0.0
-
-    tariff: TariffSpec = field(default_factory=TariffSpec)
-
-
-from dataclasses import dataclass
-from typing import Optional
 
 @dataclass
 class DispenserTypeSpec:
-    name: str
-    connector: str  # 'CCS' or 'MCS'
-    qty: int
-    imax_a: float
-    voltage_v: float = VEHICLE_VOLTAGE_V
+    """A dispenser *type* (row) in the site table."""
 
-    @property
-    def per_unit_kw(self) -> float:
-        return (self.voltage_v * self.imax_a) / 1000.0
+    name: str = "HPC"
+    qty: int = 1
+    connector: str = "CCS"  # CCS | MCS
+    imax_a: int = 250
+    dispenser_max_kw: float = 350.0
+    vehicle_voltage_v: int = 800
 
-    @property
-    def nameplate_kw(self) -> float:
-        return self.qty * self.per_unit_kw
+    def to_dict(self) -> Dict:
+        return {
+            "name": self.name,
+            "qty": self.qty,
+            "connector": self.connector,
+            "imax_a": self.imax_a,
+            "dispenser_max_kw": self.dispenser_max_kw,
+            "vehicle_voltage_v": self.vehicle_voltage_v,
+        }
+
 
 @dataclass
 class VehicleRevenueSpec:
-    price_per_kwh: float = 0.0
-    price_per_min: float = 0.0
+    """Revenue assumptions for the model."""
+
+    hpc_per_kwh: float = 0.65
+    hpc_per_min: float = 0.0
+
+    def to_dict(self) -> Dict:
+        return {
+            "hpc_per_kwh": self.hpc_per_kwh,
+            "hpc_per_min": self.hpc_per_min,
+        }
+
+
+@dataclass
+class SuperStringSpec:
+    count: int = 1
+    dc_dc_modules_per_string: int = 10
+    module_kw: float = 100.0
+
+    def to_dict(self) -> Dict:
+        return {
+            "count": self.count,
+            "dc_dc_modules_per_string": self.dc_dc_modules_per_string,
+            "module_kw": self.module_kw,
+        }
+
+
+@dataclass
+class SiteSpec:
+    """Top-level site spec used by the UI and engine."""
+
+    name: str = "Site"
+
+    # Site config (grid + dispensers + demand + revenue)
+    grid_connection_kw: float = 300.0
+    dispensers: List[DispenserTypeSpec] = field(default_factory=list)
+    demand: DemandProfile = field(default_factory=DemandProfile)
+    revenue: VehicleRevenueSpec = field(default_factory=VehicleRevenueSpec)
+    tariff: TariffSpec = field(default_factory=TariffSpec)
+
+    # Virtos implementation (DC-only v1)
+    pcs_kw: float = 300.0
+    battery_power_kw: float = 200.0
+    battery_energy_kwh: float = 400.0
+    initial_soc: float = 1.0
+    allow_grid_charging: bool = False
+    superstring: SuperStringSpec = field(default_factory=SuperStringSpec)
+
+    def to_dict(self) -> Dict:
+        return {
+            "name": self.name,
+            "grid_connection_kw": self.grid_connection_kw,
+            "dispensers": [d.to_dict() for d in self.dispensers],
+            "demand": self.demand.to_dict(),
+            "revenue": self.revenue.to_dict(),
+            "tariff": self.tariff.to_dict(),
+            "pcs_kw": self.pcs_kw,
+            "battery_power_kw": self.battery_power_kw,
+            "battery_energy_kwh": self.battery_energy_kwh,
+            "initial_soc": self.initial_soc,
+            "allow_grid_charging": self.allow_grid_charging,
+            "superstring": self.superstring.to_dict(),
+        }
