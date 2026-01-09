@@ -4,6 +4,27 @@ from typing import Dict, List
 from .schemas import SiteSpec, SuperStringSpec
 
 
+# Public entrypoint expected by the Streamlit UI.
+# We keep this tiny wrapper to avoid UI/engine naming drift.
+def run_engine(site: SiteSpec, architecture: str = "virtos_dc") -> Dict:
+    """Run the simulator for the given site spec.
+
+    Notes
+    -----
+    v1 deliberately supports DC-only Virtos architectures.
+    """
+
+    arch = (architecture or "virtos_dc").lower().strip()
+    # Allow a few aliases so the UI can stay human-friendly.
+    if arch in {"virtos", "virtos-dc", "virtos_dc", "dc", "dc-coupled"}:
+        return simulate_virtos(site)
+    if arch in {"grid", "grid_only", "grid-only"}:
+        return simulate_grid_only(site)
+
+    # Default: treat unknown as Virtos DC-coupled for now.
+    return simulate_virtos(site)
+
+
 def _site_nameplate_kw(site: SiteSpec) -> float:
     return float(sum(d.nameplate_kw for d in site.dispensers))
 
